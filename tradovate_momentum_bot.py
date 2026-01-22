@@ -50,17 +50,23 @@ class TradingConfig:
     min_price_movement: int = 7  # points/ticks (MinPriceShot)
     max_positions: int = 1  # (MaxOrdersCount)
     risk_percent: float = 120.0  # (RiskPercent)
-    take_profit: int = 22  # points/ticks (TakeProfit)
-    stop_loss: int = 10  # points/ticks (StopLoss)
-    trailing_stop: int = 5  # points/ticks (TrailingStop)
+    take_profit: int = 25  # points/ticks - INCREASED from 22 to account for slippage
+    stop_loss: int = 12  # points/ticks - INCREASED from 10 to avoid premature stops
+    trailing_stop: int = 6  # points/ticks - slightly wider for noise
     slippage: int = 3  # ticks (Slippage)
-    
+
+    # Slippage-aware order settings
+    use_limit_orders: bool = True  # Use aggressive limits instead of market orders
+    limit_offset_ticks: int = 1  # How many ticks beyond current price for aggressive limit
+    order_timeout_seconds: float = 2.0  # Cancel unfilled orders after this time
+    max_chase_attempts: int = 2  # How many times to re-price if not filled
+
     # Micro futures specific
     symbol: str = "MESZ24"  # E-mini S&P 500 Micro Dec 2024
     tick_size: float = 0.25  # MES tick size
     tick_value: float = 1.25  # MES tick value ($1.25 per tick)
     contract_multiplier: int = 5  # Micro = 1/10 of E-mini
-    
+
     # Tradovate API
     api_url: str = "https://api.tradovate.com/v1"
     ws_url: str = "wss://md.tradovate.com/v1/websocket"
@@ -77,16 +83,18 @@ class PriceSnapshot:
 
 class TradovateClient:
     """High-performance Tradovate API client with WebSocket support"""
-    
+
     def __init__(self, config: TradingConfig):
         self.config = config
         self.session: Optional[aiohttp.ClientSession] = None
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.access_token: Optional[str] = None
         self.account_id: Optional[int] = None
+        self.contract_id: Optional[int] = None  # Cached contract ID
         self.positions: Dict = {}
         self.orders: Dict = {}
         self.market_data_queue = asyncio.Queue(maxsize=1000)
+        self._position_check_counter = 0  # Throttle position checks
         
     async def connect(self, username: str, password: str, app_id: str, app_version: str):
         """Initialize connection to Tradovate"""
@@ -110,6 +118,10 @@ class TradovateClient:
             else:
                 raise Exception(f"Authentication failed: {await resp.text()}")
         
+        # Cache contract ID at startup to avoid per-order lookup
+        self.contract_id = await self.get_contract_id(self.config.symbol)
+        logger.info(f"Cached contract ID: {self.contract_id}")
+
         # Connect to WebSocket for real-time data
         await self.connect_websocket()
         
@@ -150,39 +162,62 @@ class TradovateClient:
             logger.error(f"Error getting market data: {e}")
             return None
     
-    async def place_order(self, side: OrderSide, quantity: int = 1, 
+    async def place_order(self, side: OrderSide, quantity: int = 1,
                          order_type: OrderType = OrderType.MARKET,
                          limit_price: Optional[float] = None,
                          stop_price: Optional[float] = None) -> Dict:
-        """Place an order with ultra-low latency"""
+        """Place an order with ultra-low latency using cached contract ID"""
         order_data = {
             "accountId": self.account_id,
-            "contractId": await self.get_contract_id(self.config.symbol),
+            "contractId": self.contract_id,  # Use cached ID
             "action": side.value,
             "orderQty": quantity,
             "orderType": order_type.value,
             "isAutomated": True
         }
-        
+
         if limit_price:
             order_data["price"] = limit_price
         if stop_price:
             order_data["stopPrice"] = stop_price
-            
+
         url = f"{self.config.api_url}/order/placeorder"
         headers = {"Authorization": f"Bearer {self.access_token}"}
-        
+
         start_time = time.perf_counter()
         async with self.session.post(url, json=order_data, headers=headers) as resp:
             latency = (time.perf_counter() - start_time) * 1000
-            
+
             if resp.status == 200:
                 order = await resp.json()
-                logger.info(f"Order placed in {latency:.2f}ms: {order}")
+                logger.info(f"Order placed in {latency:.2f}ms: {side.value} {order_type.value} | {order}")
                 return order
             else:
                 logger.error(f"Order failed: {await resp.text()}")
                 return {}
+
+    async def cancel_order(self, order_id: int) -> bool:
+        """Cancel an open order"""
+        url = f"{self.config.api_url}/order/cancelorder"
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+
+        async with self.session.post(url, json={"orderId": order_id}, headers=headers) as resp:
+            if resp.status == 200:
+                logger.info(f"Order {order_id} cancelled")
+                return True
+            return False
+
+    async def get_order_status(self, order_id: int) -> Optional[str]:
+        """Get status of an order"""
+        url = f"{self.config.api_url}/order/item"
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        params = {"id": order_id}
+
+        async with self.session.get(url, params=params, headers=headers) as resp:
+            if resp.status == 200:
+                order = await resp.json()
+                return order.get("ordStatus")
+        return None
     
     async def get_contract_id(self, symbol: str) -> int:
         """Get contract ID for symbol"""
@@ -299,53 +334,120 @@ class MomentumTradingStrategy:
             
         return None
     
-    async def execute_signal(self, signal: OrderSide, current_price: float):
-        """Execute trading signal with proper risk management"""
-        
-        # Calculate order parameters
+    async def execute_signal(self, signal: OrderSide, current_price: float,
+                             current_bid: float, current_ask: float):
+        """Execute trading signal with slippage-aware order management"""
+
+        # Calculate order parameters with wider targets to account for slippage
         if signal == OrderSide.BUY:
             stop_loss_price = current_price - (self.config.stop_loss * self.config.tick_size)
             take_profit_price = current_price + (self.config.take_profit * self.config.tick_size)
         else:  # SELL
             stop_loss_price = current_price + (self.config.stop_loss * self.config.tick_size)
             take_profit_price = current_price - (self.config.take_profit * self.config.tick_size)
-        
-        # Place market order with attached stop loss and take profit
-        order = await self.client.place_order(
-            side=signal,
-            quantity=1,  # Start with 1 micro contract
-            order_type=OrderType.MARKET
-        )
-        
-        if order:
+
+        # Determine order type and price based on config
+        if self.config.use_limit_orders:
+            # Use aggressive limit orders instead of market orders
+            # For BUY: place limit slightly above ask to get filled quickly
+            # For SELL: place limit slightly below bid
+            offset = self.config.limit_offset_ticks * self.config.tick_size
+
+            if signal == OrderSide.BUY:
+                limit_price = current_ask + offset
+            else:
+                limit_price = current_bid - offset
+
+            order = await self._place_order_with_retry(
+                signal, limit_price, current_bid, current_ask
+            )
+        else:
+            # Use market order (original behavior)
+            order = await self.client.place_order(
+                side=signal,
+                quantity=1,
+                order_type=OrderType.MARKET
+            )
+
+        if order and order.get("orderId"):
+            # Estimate actual fill price (for aggressive limit, assume filled at limit)
+            estimated_fill = limit_price if self.config.use_limit_orders else current_price
+
             self.position_count += 1
             self.current_position = {
                 "order_id": order.get("orderId"),
                 "side": signal,
-                "entry_price": current_price,
+                "entry_price": estimated_fill,
                 "stop_loss": stop_loss_price,
                 "take_profit": take_profit_price,
                 "timestamp": time.time()
             }
-            
-            # Place stop loss order
+
+            # Place OCO bracket: stop loss and take profit
+            # Stop loss order
             await self.client.place_order(
                 side=OrderSide.SELL if signal == OrderSide.BUY else OrderSide.BUY,
                 quantity=1,
                 order_type=OrderType.STOP,
                 stop_price=stop_loss_price
             )
-            
-            # Place take profit order
+
+            # Take profit order
             await self.client.place_order(
                 side=OrderSide.SELL if signal == OrderSide.BUY else OrderSide.BUY,
                 quantity=1,
                 order_type=OrderType.LIMIT,
                 limit_price=take_profit_price
             )
-            
+
             self.trailing_stop_price = stop_loss_price
-            logger.info(f"Position opened: {signal.value} at {current_price:.2f}")
+            logger.info(f"Position opened: {signal.value} at ~{estimated_fill:.2f} | "
+                       f"SL: {stop_loss_price:.2f} | TP: {take_profit_price:.2f}")
+
+    async def _place_order_with_retry(self, signal: OrderSide, limit_price: float,
+                                      current_bid: float, current_ask: float) -> Dict:
+        """Place order with retry logic if not filled"""
+        for attempt in range(self.config.max_chase_attempts):
+            order = await self.client.place_order(
+                side=signal,
+                quantity=1,
+                order_type=OrderType.LIMIT,
+                limit_price=limit_price
+            )
+
+            if not order or not order.get("orderId"):
+                return {}
+
+            order_id = order.get("orderId")
+
+            # Wait for fill with timeout
+            start_time = time.time()
+            while time.time() - start_time < self.config.order_timeout_seconds:
+                status = await self.client.get_order_status(order_id)
+
+                if status == "Filled":
+                    logger.info(f"Order filled on attempt {attempt + 1}")
+                    return order
+                elif status in ["Canceled", "Rejected"]:
+                    logger.warning(f"Order {status}")
+                    break
+
+                await asyncio.sleep(0.05)  # Check every 50ms
+
+            # Not filled - cancel and potentially retry
+            await self.client.cancel_order(order_id)
+
+            if attempt < self.config.max_chase_attempts - 1:
+                # Chase the price - make limit more aggressive
+                offset = self.config.tick_size * (attempt + 2)
+                if signal == OrderSide.BUY:
+                    limit_price = current_ask + offset
+                else:
+                    limit_price = current_bid - offset
+                logger.info(f"Chasing price, attempt {attempt + 2}: {limit_price:.2f}")
+
+        logger.warning("Order not filled after max attempts")
+        return {}
     
     async def manage_trailing_stop(self, current_price: float):
         """Update trailing stop for open positions"""
@@ -384,38 +486,50 @@ class MomentumTradingStrategy:
     async def run(self):
         """Main trading loop with high-frequency monitoring"""
         logger.info("Starting momentum trading strategy...")
-        
+        logger.info(f"Config: TP={self.config.take_profit} ticks, SL={self.config.stop_loss} ticks, "
+                   f"Limit orders={self.config.use_limit_orders}")
+
+        loop_counter = 0
+
         while True:
             try:
                 # Get real-time market data
                 snapshot = await self.client.get_market_data()
-                
+
                 if snapshot:
                     # Store price history
                     self.price_history.append(snapshot)
-                    
+
                     # Check for trading signals
                     signal = self.detect_momentum_signal(snapshot)
-                    
+
                     if signal:
-                        await self.execute_signal(signal, snapshot.price)
-                    
+                        # Pass bid/ask for slippage-aware execution
+                        await self.execute_signal(
+                            signal, snapshot.price,
+                            snapshot.bid, snapshot.ask
+                        )
+
                     # Manage trailing stops
                     if self.current_position:
                         await self.manage_trailing_stop(snapshot.price)
-                    
-                    # Check positions
-                    positions = await self.client.get_positions()
-                    self.position_count = len(positions)
-                    
-                    # Update position status
-                    if self.position_count == 0:
-                        self.current_position = None
-                        self.trailing_stop_price = None
-                
+
+                    # Throttle position checks to reduce latency
+                    # Only check every 50 iterations (~500ms) or after a trade
+                    loop_counter += 1
+                    if loop_counter >= 50 or signal:
+                        loop_counter = 0
+                        positions = await self.client.get_positions()
+                        self.position_count = len(positions)
+
+                        # Update position status
+                        if self.position_count == 0:
+                            self.current_position = None
+                            self.trailing_stop_price = None
+
                 # Ultra-low latency loop (10ms)
                 await asyncio.sleep(0.01)
-                
+
             except Exception as e:
                 logger.error(f"Error in trading loop: {e}")
                 await asyncio.sleep(1)
