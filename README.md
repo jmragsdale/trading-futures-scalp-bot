@@ -216,3 +216,257 @@ For issues or questions:
 - [ ] Consider live trading only after profitable demo results
 
 Remember: Start small, test thoroughly, and never trade with money you can't afford to lose!
+
+---
+
+# Schwab 0DTE SPY Options Bot - Quick Start Guide
+
+A momentum-based scalping bot for 0DTE (zero days to expiration) SPY options using the Schwab API.
+
+## Prerequisites
+
+- Python 3.9+
+- Schwab brokerage account with options approval
+- Registered app at [developer.schwab.com](https://developer.schwab.com)
+- Your app's **Client ID** and **Client Secret**
+- Callback URL registered as `https://127.0.0.1:8081`
+
+## Quick Start
+
+### 1. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Get Your Refresh Token
+
+Run the authentication helper to get your Schwab refresh token:
+
+```bash
+python schwab_8081_fixed.py
+```
+
+This will:
+1. Prompt for your Client ID and Secret
+2. Open Schwab login in your browser
+3. Capture the OAuth callback automatically
+4. Display your refresh token
+
+Save the refresh token - you'll need it for setup.
+
+### 3. Run Setup Wizard
+
+```bash
+python schwab_0dte_main.py --setup
+```
+
+Enter your credentials when prompted:
+- Client ID
+- Client Secret
+- Redirect URI (press Enter for default `https://127.0.0.1:8081`)
+
+### 4. Start Paper Trading
+
+```bash
+python schwab_0dte_main.py --paper
+```
+
+### 5. View Current Configuration
+
+```bash
+python schwab_0dte_main.py --show
+```
+
+## Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `python schwab_0dte_main.py --setup` | First-time setup wizard |
+| `python schwab_0dte_main.py --paper` | Paper trading mode (default) |
+| `python schwab_0dte_main.py --live` | Live trading (requires confirmation) |
+| `python schwab_0dte_main.py --show` | Display current configuration |
+| `python schwab_0dte_main.py --log-level DEBUG` | Enable debug logging |
+
+## Configuration
+
+After setup, configuration is stored in `~/.schwab_0dte_bot/config.yaml`:
+
+```yaml
+strategy:
+  time_window_seconds: 14        # Momentum detection window
+  min_price_movement_dollars: 0.50  # Min SPY move to trigger
+  target_delta: 0.45             # Option delta target
+  max_bid_ask_spread_percent: 0.08  # Max acceptable spread
+  stop_loss_percent: 35.0        # Stop loss trigger
+  take_profit_percent: 60.0      # Take profit trigger
+  no_trade_before: "09:45"       # Start trading time
+  no_trade_after: "15:00"        # Stop trading time
+
+underlying:
+  symbol: SPY
+
+environment:
+  paper_trading: true
+  log_level: INFO
+```
+
+## Strategy Overview
+
+The bot monitors SPY price movements and trades 0DTE options based on momentum signals:
+
+- **Entry**: Detects rapid price movement ($0.50+ in 14 seconds)
+- **Option Selection**: Targets ~0.45 delta options with tight bid-ask spreads
+- **Exit Rules**:
+  - Stop Loss: -35%
+  - Take Profit: +60%
+  - EOD Exit: Forces close at 3:55 PM ET
+
+## Risk Warning
+
+**0DTE options trading is EXTREMELY HIGH RISK.** Options can expire worthless within hours. The high leverage works both ways - you can lose your entire investment quickly.
+
+- Always start with paper trading
+- Only trade with money you can afford to lose
+- Monitor positions actively
+- Refresh tokens expire after 7 days of inactivity
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| "No credentials found" | Run `--setup` first |
+| Login page won't load | Ensure callback URL is `https://127.0.0.1:8081` in Schwab developer portal |
+| Token expired | Re-run `python schwab_8081_fixed.py` to get new refresh token |
+| Port 8081 in use | Run `lsof -ti:8081 \| xargs kill -9` then try again |
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `schwab_0dte_main.py` | Main entry point and trading loop |
+| `schwab_0dte_bot.py` | Core trading logic and Schwab API client |
+| `schwab_config_manager.py` | Credential storage and configuration |
+| `schwab_8081_fixed.py` | OAuth helper for getting refresh tokens |
+
+---
+
+# Tradovate Position Monitor Bot
+
+A position management bot that monitors manually-entered trades and automatically manages stops and targets based on TradingView signals.
+
+## Features
+
+- **Manual Entry, Auto Management**: Enter trades yourself, let the bot handle stop loss and take profit
+- **EMA-Based Stops**: Stop loss calculated from EMA(20) + 4 tick offset
+- **R-Based Targets**: Breakeven at 3R, take profit at 2.5R
+- **TradingView Integration**: Receives webhook alerts for stop out, breakeven, and timeout signals
+- **Real-time Monitoring**: Tracks positions and updates stops as price moves
+
+## Quick Start
+
+### 1. Setup Credentials
+
+```bash
+python position_monitor_main.py --setup
+```
+
+### 2. Start Monitor (Demo Mode)
+
+```bash
+python position_monitor_main.py
+```
+
+### 3. Configure TradingView Alerts
+
+Set up alerts in TradingView to send webhooks to:
+```
+http://your-server-ip:5000/webhook
+```
+
+Alert JSON format:
+```json
+{"alert_type": "breakeven"}
+{"alert_type": "stop_out"}
+{"alert_type": "timeout"}
+```
+
+## Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `python position_monitor_main.py` | Start in demo mode |
+| `python position_monitor_main.py --live` | Start in live mode |
+| `python position_monitor_main.py --setup` | Credential setup |
+| `python position_monitor_main.py --show` | Show configuration |
+| `python position_monitor_main.py --symbol MNQ` | Monitor MNQ |
+| `python position_monitor_main.py --ema 10` | Use EMA(10) |
+| `python position_monitor_main.py --be-r 2.0` | Breakeven at 2R |
+
+## Configuration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--symbol` | MES | Futures contract to monitor |
+| `--ema` | 20 | EMA period for stop calculation |
+| `--stop-offset` | 4 | Ticks beyond EMA for stop |
+| `--be-r` | 3.0 | R-multiple to trigger breakeven |
+| `--tp-r` | 2.5 | R-multiple for take profit |
+| `--port` | 5000 | Webhook server port |
+
+## How It Works
+
+1. **Position Detection**: When you enter a trade manually, the bot detects the new position
+2. **Initial Stop**: Places a stop order at EMA(20) - 4 ticks (for longs) or EMA(20) + 4 ticks (for shorts)
+3. **R-Calculation**: Calculates your risk (entry to initial stop) and R-multiples
+4. **Stop Trailing**: As price moves favorably, stop trails based on EMA
+5. **Breakeven**: When profit reaches 3R, stop moves to breakeven + 1 tick
+6. **Take Profit**: At 2.5R profit, position is closed at market
+7. **Alert Response**: TradingView webhooks can trigger immediate stop out or breakeven
+
+## Example Session
+
+```
+============================================================
+  TRADOVATE POSITION MONITOR
+============================================================
+
+  Mode: DEMO
+  Symbol: MES
+  EMA Period: 20
+  Stop Offset: 4 ticks
+  Breakeven: 3.0R
+  Take Profit: 2.5R
+
+  Webhook: http://localhost:5000/webhook
+
+  Waiting for positions...
+============================================================
+
+2024-01-15 10:30:15 - Now tracking: LONG 1 @ 4850.25
+2024-01-15 10:30:15 - Initial stop: 4847.25 | Risk: 3.00 (12 ticks)
+2024-01-15 10:30:15 - BE target: 4859.25 (3.0R)
+2024-01-15 10:30:15 - TP target: 4857.75 (2.5R)
+2024-01-15 10:35:22 - Stop modified to 4848.50
+2024-01-15 10:42:18 - R-multiple reached 3.2R - triggering breakeven
+2024-01-15 10:42:18 - Moved to breakeven @ 4850.50
+2024-01-15 10:48:33 - Take profit target reached (2.6R) - closing position
+```
+
+## Webhook Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/webhook` | POST | Receive TradingView alerts |
+| `/health` | GET | Health check with current status |
+
+### Health Check Response
+
+```json
+{
+  "status": "healthy",
+  "positions": 1,
+  "last_price": 4855.25,
+  "ema": 4852.50
+}
+```

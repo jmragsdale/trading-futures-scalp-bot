@@ -417,6 +417,11 @@ class ZeroDTEMomentumStrategy:
         self.last_signal_price = 0
         self.current_position: Optional[Dict] = None
         self.position_entry_price = 0
+        self.running = False
+
+    def stop(self):
+        """Stop the trading loop"""
+        self.running = False
 
     def _is_trading_hours(self) -> bool:
         """Check if within allowed trading hours"""
@@ -458,6 +463,13 @@ class ZeroDTEMomentumStrategy:
 
         # Check for signal within time window
         if time_diff <= self.config.time_window:
+            # Log when we're getting close to a signal (80%+ of threshold)
+            threshold_pct = abs(price_diff) / self.config.min_price_movement
+            if threshold_pct >= 0.80 and threshold_pct < 1.0:
+                direction = "up" if price_diff > 0 else "down"
+                logger.debug(f"Near signal: SPY {direction} ${abs(price_diff):.2f} in {time_diff:.1f}s "
+                            f"({threshold_pct*100:.0f}% of ${self.config.min_price_movement} threshold)")
+
             if abs(price_diff) >= self.config.min_price_movement:
                 if self.current_position is None:
                     # Update reference
@@ -496,25 +508,32 @@ class ZeroDTEMomentumStrategy:
 
         # Score contracts with enhanced slippage-aware filtering
         scored = []
+        rejection_reasons = {"no_quote": 0, "low_premium": 0, "wide_spread": 0, "low_volume": 0, "low_oi": 0}
+
         for c in candidates:
             # Basic validity
             if c.bid <= 0 or c.ask <= 0:
+                rejection_reasons["no_quote"] += 1
                 continue
 
             # SLIPPAGE FILTER 1: Minimum premium (spread is less % impact)
             if c.mid_price < self.config.min_option_price:
+                rejection_reasons["low_premium"] += 1
                 continue
 
             # SLIPPAGE FILTER 2: Tight spread requirement
             if c.spread_percent > self.config.max_bid_ask_spread:
+                rejection_reasons["wide_spread"] += 1
                 continue
 
             # SLIPPAGE FILTER 3: Minimum volume for liquidity
             if c.volume < self.config.min_volume:
+                rejection_reasons["low_volume"] += 1
                 continue
 
             # SLIPPAGE FILTER 4: Minimum open interest
             if c.open_interest < self.config.min_open_interest:
+                rejection_reasons["low_oi"] += 1
                 continue
 
             # Calculate scores (lower is better)
@@ -531,6 +550,11 @@ class ZeroDTEMomentumStrategy:
         if not scored:
             logger.warning(f"No suitable {option_type.value} contracts found "
                           f"(checked {len(candidates)} candidates)")
+            logger.warning(f"Rejection breakdown: no_quote={rejection_reasons['no_quote']}, "
+                          f"low_premium(<${self.config.min_option_price})={rejection_reasons['low_premium']}, "
+                          f"wide_spread(>{self.config.max_bid_ask_spread*100:.0f}%)={rejection_reasons['wide_spread']}, "
+                          f"low_volume(<{self.config.min_volume})={rejection_reasons['low_volume']}, "
+                          f"low_OI(<{self.config.min_open_interest})={rejection_reasons['low_oi']}")
             return None
 
         # Return best contract
@@ -733,10 +757,24 @@ class ZeroDTEMomentumStrategy:
                    f"Min premium=${self.config.min_option_price}, "
                    f"Max spread={self.config.max_bid_ask_spread*100:.0f}%")
 
-        while True:
+        self.running = True
+        last_heartbeat = 0
+        heartbeat_interval = 300  # Log status every 5 minutes
+
+        while self.running:
             try:
                 # Get SPY quote
                 snapshot = await self.client.get_quote("SPY")
+
+                # Periodic heartbeat to show bot is alive
+                now = time.time()
+                if now - last_heartbeat >= heartbeat_interval:
+                    if snapshot and self._is_trading_hours():
+                        status = "Monitoring" if not self.current_position else "In position"
+                        logger.info(f"[Heartbeat] {status} | SPY: ${snapshot.price:.2f} | "
+                                   f"Reference: ${self.last_signal_price:.2f} | "
+                                   f"Signals today: checking for ${self.config.min_price_movement} moves")
+                    last_heartbeat = now
 
                 if snapshot:
                     self.price_history.append(snapshot)
@@ -755,7 +793,7 @@ class ZeroDTEMomentumStrategy:
                 await asyncio.sleep(0.05)
 
             except Exception as e:
-                logger.error(f"Error in trading loop: {e}")
+                logger.error(f"Error in trading loop: {type(e).__name__}: {e}", exc_info=True)
                 await asyncio.sleep(1)
 
 

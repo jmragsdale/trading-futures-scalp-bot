@@ -47,9 +47,11 @@ class TradingApplication:
 
     def __init__(self, config_dir: str = "~/.schwab_0dte_bot",
                  paper_trading: bool = True,
+                 live_flag_explicit: bool = False,
                  log_level: str = "INFO"):
         self.config_mgr = SchwabConfigManager(config_dir)
         self.paper_trading = paper_trading
+        self.live_flag_explicit = live_flag_explicit  # True if --live was passed
         self.client: Optional[SchwabClient] = None
         self.strategy: Optional[ZeroDTEMomentumStrategy] = None
         self.running = False
@@ -73,8 +75,8 @@ class TradingApplication:
         # Load strategy configuration
         params, underlying, environment = self.config_mgr.load_strategy_config()
 
-        # Override paper trading from environment config if not explicitly set
-        if 'paper_trading' in environment:
+        # Only use config file paper_trading if --live wasn't explicitly passed
+        if not self.live_flag_explicit and 'paper_trading' in environment:
             self.paper_trading = environment['paper_trading']
 
         # Build options config
@@ -200,7 +202,7 @@ class TradingApplication:
                 logger.info("Trading loop cancelled")
                 break
             except Exception as e:
-                logger.error(f"Error in trading loop: {e}")
+                logger.error(f"Error in trading loop: {type(e).__name__}: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
     async def _run_paper_trading(self):
@@ -283,7 +285,7 @@ class TradingApplication:
                 await asyncio.sleep(0.05)
 
             except Exception as e:
-                logger.error(f"Paper trading error: {e}")
+                logger.error(f"Paper trading error: {type(e).__name__}: {e}", exc_info=True)
                 await asyncio.sleep(1)
 
         # Session summary
@@ -306,6 +308,14 @@ class TradingApplication:
         logger.info("Shutting down...")
         self.running = False
 
+        # Stop the strategy first (so it stops making API calls)
+        if self.strategy:
+            self.strategy.stop()
+
+        # Small delay to let the loop exit cleanly
+        await asyncio.sleep(0.2)
+
+        # Then close the client session
         if self.client:
             await self.client.close()
 
@@ -331,6 +341,7 @@ async def main_async(args):
     app = TradingApplication(
         config_dir=args.config_dir,
         paper_trading=not args.live,
+        live_flag_explicit=args.live,
         log_level=args.log_level
     )
 

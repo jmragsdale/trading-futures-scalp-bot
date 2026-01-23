@@ -7,8 +7,6 @@ import os
 import json
 import logging
 import webbrowser
-import secrets
-import hashlib
 import base64
 from pathlib import Path
 from typing import Dict, Optional
@@ -29,7 +27,7 @@ class SchwabCredentials:
     client_id: str
     client_secret: str
     refresh_token: str
-    redirect_uri: str = "https://127.0.0.1:8182/callback"
+    redirect_uri: str = "https://127.0.0.1:8081"
 
 
 @dataclass
@@ -235,7 +233,7 @@ class SchwabConfigManager:
                 client_id=client_id,
                 client_secret=keyring.get_password("schwab_0dte_bot", "client_secret"),
                 refresh_token=keyring.get_password("schwab_0dte_bot", "refresh_token"),
-                redirect_uri=keyring.get_password("schwab_0dte_bot", "redirect_uri") or "https://127.0.0.1:8182/callback"
+                redirect_uri=keyring.get_password("schwab_0dte_bot", "redirect_uri") or "https://127.0.0.1:8081"
             )
         except Exception:
             return None
@@ -293,37 +291,19 @@ class SchwabConfigManager:
         print(f"\nDefault configuration created at: {self.config_file}")
         print(f"Using '{preset}' strategy preset.")
 
-    def generate_pkce_pair(self) -> tuple[str, str]:
-        """Generate PKCE code verifier and challenge for OAuth"""
-        # Generate random code verifier (43-128 chars)
-        code_verifier = secrets.token_urlsafe(32)
-
-        # Create code challenge (SHA256 hash, base64url encoded)
-        code_challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode()).digest()
-        ).decode().rstrip('=')
-
-        return code_verifier, code_challenge
-
-
-def perform_oauth_flow(client_id: str, redirect_uri: str = "https://127.0.0.1:8182/callback") -> Optional[str]:
+def perform_oauth_flow(client_id: str, redirect_uri: str = "https://127.0.0.1:8081") -> Optional[str]:
     """
     Perform OAuth authorization flow to get authorization code
 
     Note: Schwab requires HTTPS for callbacks. For local development,
     you may need to use their provided callback URL or set up local HTTPS.
     """
-    config_mgr = SchwabConfigManager()
-    code_verifier, code_challenge = config_mgr.generate_pkce_pair()
-
-    # Build authorization URL
+    # Build authorization URL (no PKCE - matches working schwab_8081_fixed.py)
     auth_params = {
         "response_type": "code",
         "client_id": client_id,
         "redirect_uri": redirect_uri,
-        "scope": "api",
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256"
+        "scope": "api"
     }
 
     auth_url = f"https://api.schwabapi.com/v1/oauth/authorize?{urlencode(auth_params)}"
@@ -343,7 +323,7 @@ def perform_oauth_flow(client_id: str, redirect_uri: str = "https://127.0.0.1:81
 
     print("\nAfter authorizing, you'll be redirected.")
     print("Copy the FULL redirect URL from your browser and paste it here.")
-    print("\n(The URL will look like: https://127.0.0.1:8182/callback?code=...)")
+    print("\n(The URL will look like: https://127.0.0.1:8081?code=...)")
 
     callback_url = input("\nPaste redirect URL here: ").strip()
 
@@ -355,19 +335,19 @@ def perform_oauth_flow(client_id: str, redirect_uri: str = "https://127.0.0.1:81
         if 'code' in params:
             auth_code = params['code'][0]
             print("\nAuthorization code captured successfully!")
-            return auth_code, code_verifier
+            return auth_code
         else:
             print(f"\nError: No authorization code found in URL")
             if 'error' in params:
                 print(f"Error: {params['error'][0]}")
-            return None, None
+            return None
     except Exception as e:
         print(f"\nError parsing callback URL: {e}")
-        return None, None
+        return None
 
 
 async def exchange_code_for_tokens(client_id: str, client_secret: str,
-                                    auth_code: str, code_verifier: str,
+                                    auth_code: str,
                                     redirect_uri: str) -> Optional[dict]:
     """Exchange authorization code for access and refresh tokens"""
     import aiohttp
@@ -382,8 +362,7 @@ async def exchange_code_for_tokens(client_id: str, client_secret: str,
     data = {
         "grant_type": "authorization_code",
         "code": auth_code,
-        "redirect_uri": redirect_uri,
-        "code_verifier": code_verifier
+        "redirect_uri": redirect_uri
     }
 
     async with aiohttp.ClientSession() as session:
@@ -422,13 +401,13 @@ def setup_credentials_interactive():
     redirect_uri = input("Redirect URI (press Enter for default): ").strip()
 
     if not redirect_uri:
-        redirect_uri = "https://127.0.0.1:8182/callback"
+        redirect_uri = "https://127.0.0.1:8081"
 
     print("\n" + "-"*60)
     print("STEP 2: OAuth Authorization")
     print("-"*60)
 
-    auth_code, code_verifier = perform_oauth_flow(client_id, redirect_uri)
+    auth_code = perform_oauth_flow(client_id, redirect_uri)
 
     if not auth_code:
         print("\n❌ Authorization failed. Please try again.")
@@ -440,7 +419,7 @@ def setup_credentials_interactive():
 
     # Exchange for tokens
     token_data = asyncio.run(exchange_code_for_tokens(
-        client_id, client_secret, auth_code, code_verifier, redirect_uri
+        client_id, client_secret, auth_code, redirect_uri
     ))
 
     if not token_data:
