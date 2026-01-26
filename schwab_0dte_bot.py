@@ -67,6 +67,11 @@ class OptionsConfig:
     take_profit_percent: float = 60.0  # INCREASED from 50 - need higher target to overcome spread
     max_theta_decay_risk: float = 0.05  # Max acceptable theta as % of premium
 
+    # Trailing stop settings
+    use_trailing_stop: bool = True
+    trailing_stop_percent: float = 20.0  # Trail 20% below high-water mark
+    trailing_stop_activation: float = 15.0  # Activate after 15% profit
+
     # Slippage-aware order settings
     use_aggressive_limit: bool = True  # Use ask+offset for buys, bid-offset for sells
     limit_offset_cents: float = 0.02  # $0.02 above ask for buys (to get filled)
@@ -419,6 +424,11 @@ class ZeroDTEMomentumStrategy:
         self.position_entry_price = 0
         self.running = False
 
+        # Trailing stop tracking
+        self.high_water_mark: float = 0.0
+        self.trailing_stop_price: float = 0.0
+        self.trailing_stop_active: bool = False
+
     def stop(self):
         """Stop the trading loop"""
         self.running = False
@@ -668,6 +678,42 @@ class ZeroDTEMomentumStrategy:
         logger.warning(f"Order not filled after {self.config.max_chase_attempts} attempts")
         return None
 
+    def manage_trailing_stop(self, current_price: float, entry_price: float) -> Tuple[bool, float]:
+        """
+        Update trailing stop based on current option price.
+        Returns (should_exit, trailing_stop_price)
+        """
+        # Calculate current P&L percentage
+        pnl_percent = ((current_price - entry_price) / entry_price) * 100
+
+        # Check if trailing stop should activate
+        if not self.trailing_stop_active:
+            if pnl_percent >= self.config.trailing_stop_activation:
+                self.trailing_stop_active = True
+                self.high_water_mark = current_price
+                # Set initial trailing stop
+                self.trailing_stop_price = current_price * (1 - self.config.trailing_stop_percent / 100)
+                logger.info(f"Trailing stop activated at {pnl_percent:.1f}% profit, "
+                           f"stop set at ${self.trailing_stop_price:.2f}")
+            return False, 0.0
+
+        # Update high water mark if price moved higher
+        if current_price > self.high_water_mark:
+            self.high_water_mark = current_price
+            new_stop = current_price * (1 - self.config.trailing_stop_percent / 100)
+
+            # Only ratchet stop upward
+            if new_stop > self.trailing_stop_price:
+                self.trailing_stop_price = new_stop
+                logger.info(f"Trailing stop raised to ${self.trailing_stop_price:.2f} "
+                           f"(high: ${self.high_water_mark:.2f})")
+
+        # Check if stop was hit
+        if current_price <= self.trailing_stop_price:
+            return True, self.trailing_stop_price
+
+        return False, self.trailing_stop_price
+
     async def manage_position(self, spy_price: float):
         """Manage open position - check for exit conditions"""
         if not self.current_position:
@@ -694,13 +740,20 @@ class ZeroDTEMomentumStrategy:
         should_exit = False
         exit_reason = ""
 
-        # Stop loss
-        if pnl_percent <= -self.config.stop_loss_percent:
+        # Check trailing stop first (if enabled)
+        if self.config.use_trailing_stop:
+            should_trail_exit, trail_price = self.manage_trailing_stop(current_price, entry_price)
+            if should_trail_exit:
+                should_exit = True
+                exit_reason = f"Trailing stop hit at ${trail_price:.2f} ({pnl_percent:.1f}%)"
+
+        # Stop loss (fixed)
+        if not should_exit and pnl_percent <= -self.config.stop_loss_percent:
             should_exit = True
             exit_reason = f"Stop loss hit ({pnl_percent:.1f}%)"
 
-        # Take profit
-        elif pnl_percent >= self.config.take_profit_percent:
+        # Take profit (fixed)
+        if not should_exit and pnl_percent >= self.config.take_profit_percent:
             should_exit = True
             exit_reason = f"Take profit hit ({pnl_percent:.1f}%)"
 
@@ -736,6 +789,10 @@ class ZeroDTEMomentumStrategy:
             logger.info(f"Position closed: {reason} | Entry: ${entry:.2f} | "
                        f"Exit: ${exit_price:.2f} | P&L: ${pnl:.2f} ({pnl_percent:.1f}%)")
             self.current_position = None
+            # Reset trailing stop state
+            self.trailing_stop_active = False
+            self.high_water_mark = 0.0
+            self.trailing_stop_price = 0.0
         else:
             # Emergency: if we can't get filled, use market-equivalent (hit the bid)
             logger.warning(f"Fill failed, emergency exit at bid ${contract.bid:.2f}")
@@ -746,6 +803,10 @@ class ZeroDTEMomentumStrategy:
                 limit_price=contract.bid - 0.05  # Very aggressive
             )
             self.current_position = None
+            # Reset trailing stop state
+            self.trailing_stop_active = False
+            self.high_water_mark = 0.0
+            self.trailing_stop_price = 0.0
 
     async def run(self):
         """Main trading loop"""
@@ -756,6 +817,9 @@ class ZeroDTEMomentumStrategy:
                    f"SL={self.config.stop_loss_percent}%, "
                    f"Min premium=${self.config.min_option_price}, "
                    f"Max spread={self.config.max_bid_ask_spread*100:.0f}%")
+        if self.config.use_trailing_stop:
+            logger.info(f"Trailing stop: activates at {self.config.trailing_stop_activation}% profit, "
+                       f"trails {self.config.trailing_stop_percent}% below high")
 
         self.running = True
         last_heartbeat = 0

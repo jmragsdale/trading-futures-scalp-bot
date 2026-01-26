@@ -300,6 +300,9 @@ strategy:
   max_bid_ask_spread_percent: 0.08  # Max acceptable spread
   stop_loss_percent: 35.0        # Stop loss trigger
   take_profit_percent: 60.0      # Take profit trigger
+  use_trailing_stop: true        # Enable trailing stop
+  trailing_stop_activation: 15.0 # Activate after 15% profit
+  trailing_stop_percent: 20.0    # Trail 20% below high
   no_trade_before: "09:45"       # Start trading time
   no_trade_after: "15:00"        # Stop trading time
 
@@ -318,8 +321,9 @@ The bot monitors SPY price movements and trades 0DTE options based on momentum s
 - **Entry**: Detects rapid price movement ($0.50+ in 14 seconds)
 - **Option Selection**: Targets ~0.45 delta options with tight bid-ask spreads
 - **Exit Rules**:
-  - Stop Loss: -35%
-  - Take Profit: +60%
+  - Trailing Stop: Activates at +15% profit, trails 20% below high-water mark
+  - Stop Loss: -35% (fixed, fallback if trailing not active)
+  - Take Profit: +60% (fixed)
   - EOD Exit: Forces close at 3:55 PM ET
 
 ## Risk Warning
