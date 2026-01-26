@@ -92,8 +92,8 @@ class TradingApplication:
             symbol=underlying.symbol
         )
 
-        # Initialize client
-        self.client = SchwabClient(options_config)
+        # Initialize client (pass config_mgr for automatic token persistence)
+        self.client = SchwabClient(options_config, config_manager=self.config_mgr)
 
         try:
             await self.client.initialize(
@@ -101,10 +101,6 @@ class TradingApplication:
                 client_secret=credentials.client_secret,
                 refresh_token=credentials.refresh_token
             )
-
-            # Update refresh token if it changed
-            if self.client.refresh_token != credentials.refresh_token:
-                self.config_mgr.update_refresh_token(self.client.refresh_token)
 
         except Exception as e:
             logger.error(f"Failed to initialize Schwab client: {e}")

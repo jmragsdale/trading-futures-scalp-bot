@@ -142,8 +142,9 @@ class SchwabClient:
     Handles OAuth2 authentication and trading operations
     """
 
-    def __init__(self, config: OptionsConfig):
+    def __init__(self, config: OptionsConfig, config_manager=None):
         self.config = config
+        self.config_manager = config_manager  # For persisting new refresh tokens
         self.session: Optional[aiohttp.ClientSession] = None
         self.access_token: Optional[str] = None
         self.refresh_token: Optional[str] = None
@@ -196,7 +197,15 @@ class SchwabClient:
             if resp.status == 200:
                 token_data = await resp.json()
                 self.access_token = token_data["access_token"]
-                self.refresh_token = token_data.get("refresh_token", self.refresh_token)
+                new_refresh_token = token_data.get("refresh_token")
+
+                # Persist new refresh token if one was issued
+                if new_refresh_token and new_refresh_token != self.refresh_token:
+                    self.refresh_token = new_refresh_token
+                    if self.config_manager:
+                        self.config_manager.update_refresh_token(new_refresh_token)
+                        logger.info("New refresh token saved")
+
                 expires_in = token_data.get("expires_in", 1800)
                 self.token_expiry = datetime.now() + timedelta(seconds=expires_in - 60)
                 logger.info("Access token refreshed")
@@ -896,7 +905,7 @@ async def main():
         symbol=underlying.symbol
     )
 
-    client = SchwabClient(config)
+    client = SchwabClient(config, config_manager=config_mgr)
 
     try:
         await client.initialize(
