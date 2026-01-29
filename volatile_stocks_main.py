@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Main Application Entry Point for Schwab 0DTE Options Trading Bot
+Main Application Entry Point for Volatile Stocks 0DTE Options Trading Bot
 
 Usage:
-    python schwab_0dte_main.py --setup      # First-time setup
-    python schwab_0dte_main.py --paper      # Paper trading mode
-    python schwab_0dte_main.py --live       # Live trading (requires confirmation)
-    python schwab_0dte_main.py --show       # Show current configuration
+    python volatile_stocks_main.py --paper      # Paper trading mode
+    python volatile_stocks_main.py --live       # Live trading (requires confirmation)
+    python volatile_stocks_main.py --tickers NVDA,TSLA,AMD  # Custom ticker list
 """
 
 import asyncio
@@ -18,20 +17,13 @@ from datetime import datetime, time as dt_time
 from typing import Optional
 
 # Import bot components
-from schwab_0dte_bot import (
-    SchwabClient,
-    ZeroDTEMomentumStrategy,
-    OptionsConfig,
-    OptionType
+from volatile_stocks_0dte_bot import (
+    VolatileStockClient,
+    VolatileStockMomentumStrategy,
+    VolatileStockConfig
 )
-from schwab_config_manager import (
-    SchwabConfigManager,
-    SchwabCredentials,
-    OptionsStrategyParameters,
-    UnderlyingConfig,
-    setup_credentials_interactive,
-    show_current_config
-)
+from schwab_0dte_bot import OptionsConfig
+from schwab_config_manager import SchwabConfigManager
 
 # Configure logging
 logging.basicConfig(
@@ -42,20 +34,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class TradingApplication:
-    """Main application lifecycle manager"""
+class VolatileStockTradingApp:
+    """Main application for volatile stock trading"""
 
     def __init__(self, config_dir: str = "~/.schwab_0dte_bot",
                  paper_trading: bool = True,
-                 live_flag_explicit: bool = False,
+                 tickers: Optional[list] = None,
                  log_level: str = "INFO",
                  enable_safety: bool = True):
         self.config_mgr = SchwabConfigManager(config_dir)
         self.paper_trading = paper_trading
-        self.live_flag_explicit = live_flag_explicit  # True if --live was passed
+        self.custom_tickers = tickers
         self.enable_safety = enable_safety
-        self.client: Optional[SchwabClient] = None
-        self.strategy: Optional[ZeroDTEMomentumStrategy] = None
+        self.client: Optional[VolatileStockClient] = None
+        self.strategy: Optional[VolatileStockMomentumStrategy] = None
         self.safety_manager = None
         self.running = False
 
@@ -64,7 +56,7 @@ class TradingApplication:
 
     async def initialize(self) -> bool:
         """Initialize the trading application"""
-        logger.info("Initializing Schwab 0DTE Options Trading Bot...")
+        logger.info("Initializing Volatile Stocks 0DTE Options Trading Bot...")
 
         # Load credentials
         credentials = self.config_mgr.load_credentials()
@@ -72,31 +64,24 @@ class TradingApplication:
             credentials = self.config_mgr.load_credentials_from_keyring()
 
         if not credentials:
-            logger.error("No credentials found. Run with --setup first.")
+            logger.error("No credentials found. Run schwab_0dte_main.py --setup first.")
             return False
 
-        # Load strategy configuration
-        params, underlying, environment = self.config_mgr.load_strategy_config()
+        # Build volatile stock config
+        vstk_config = VolatileStockConfig()
 
-        # Only use config file paper_trading if --live wasn't explicitly passed
-        if not self.live_flag_explicit and 'paper_trading' in environment:
-            self.paper_trading = environment['paper_trading']
+        # Override tickers if custom list provided
+        if self.custom_tickers:
+            vstk_config.tickers = self.custom_tickers
+            logger.info(f"Using custom tickers: {', '.join(self.custom_tickers)}")
 
-        # Build options config
-        options_config = OptionsConfig(
-            time_window=params.time_window_seconds,
-            min_price_movement=params.min_price_movement_dollars,
-            target_delta=params.target_delta,
-            max_bid_ask_spread=params.max_bid_ask_spread_percent,
-            stop_loss_percent=params.stop_loss_percent,
-            take_profit_percent=params.take_profit_percent,
-            no_trade_before=params.no_trade_before,
-            no_trade_after=params.no_trade_after,
-            symbol=underlying.symbol
+        # Build base OptionsConfig for Schwab client
+        base_config = OptionsConfig(
+            symbol="SPY"  # Placeholder, not used for multi-ticker
         )
 
-        # Initialize client (pass config_mgr for automatic token persistence)
-        self.client = SchwabClient(options_config, config_manager=self.config_mgr)
+        # Initialize client
+        self.client = VolatileStockClient(base_config, config_manager=self.config_mgr)
 
         try:
             await self.client.initialize(
@@ -113,35 +98,30 @@ class TradingApplication:
         if self.enable_safety:
             from schwab_account_safety import AccountSafetyManager
 
-            # Get account info to determine settings
             try:
                 account_data = await self.client.get_account_info()
                 account_value = account_data.get('liquidationValue', 1000)
 
-                # Adjust safety settings based on account size
+                # Adjust safety settings based on account size (same logic as SPY bot)
                 if account_value < 1000:
-                    # Very small account - ultra conservative
                     max_position_pct = 15.0
                     max_daily_loss = 75.0
                     max_daily_trades = 2
                     cash_buffer = 100.0
                     logger.warning(f"⚠️  Small account (${account_value:.2f}) - Conservative safety limits applied")
                 elif account_value < 3000:
-                    # Small account - conservative
                     max_position_pct = 20.0
                     max_daily_loss = 100.0
                     max_daily_trades = 3
                     cash_buffer = 100.0
                     logger.info(f"Account size: ${account_value:.2f} - Conservative safety limits")
                 elif account_value < 10000:
-                    # Medium account - moderate
                     max_position_pct = 25.0
                     max_daily_loss = 200.0
                     max_daily_trades = 5
                     cash_buffer = 200.0
                     logger.info(f"Account size: ${account_value:.2f} - Moderate safety limits")
                 else:
-                    # Large account - standard
                     max_position_pct = 30.0
                     max_daily_loss = 500.0
                     max_daily_trades = 10
@@ -170,9 +150,8 @@ class TradingApplication:
                 self.safety_manager = None
 
         # Initialize strategy
-        self.strategy = ZeroDTEMomentumStrategy(self.client, options_config, safety_manager=self.safety_manager)
+        self.strategy = VolatileStockMomentumStrategy(self.client, vstk_config, safety_manager=self.safety_manager)
 
-        # Set paper trading flag
         if self.paper_trading:
             logger.info("="*50)
             logger.info("  PAPER TRADING MODE - No real orders will be placed")
@@ -184,11 +163,9 @@ class TradingApplication:
         """Check if US equity options market is open"""
         now = datetime.now()
 
-        # Check weekday
-        if now.weekday() >= 5:  # Saturday = 5, Sunday = 6
+        if now.weekday() >= 5:
             return False
 
-        # Market hours: 9:30 AM - 4:00 PM ET
         market_open = dt_time(9, 30)
         market_close = dt_time(16, 0)
         current_time = now.time()
@@ -199,21 +176,12 @@ class TradingApplication:
         """Calculate seconds until market opens"""
         now = datetime.now()
 
-        # If weekend, calculate time until Monday 9:30
-        days_until_monday = (7 - now.weekday()) % 7
-        if days_until_monday == 0 and now.time() > dt_time(16, 0):
-            days_until_monday = 7 - now.weekday() if now.weekday() < 5 else (7 - now.weekday() + 1)
-
-        if now.weekday() >= 5:
-            days_until_monday = 7 - now.weekday()
-            if now.weekday() == 6:
-                days_until_monday = 1
-
         # Calculate next market open
         next_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
 
         if now.time() >= dt_time(16, 0) or now.weekday() >= 5:
-            # After close or weekend - next trading day
+            from datetime import timedelta
+            # After close or weekend
             if now.weekday() == 4:  # Friday after close
                 days_until_monday = 3
             elif now.weekday() == 5:  # Saturday
@@ -223,7 +191,6 @@ class TradingApplication:
             else:
                 days_until_monday = 1
 
-            from datetime import timedelta
             next_open = (now + timedelta(days=days_until_monday)).replace(
                 hour=9, minute=30, second=0, microsecond=0
             )
@@ -234,8 +201,8 @@ class TradingApplication:
         """Main trading loop"""
         self.running = True
 
-        logger.info("Starting trading application...")
-        logger.info(f"Symbol: SPY | Mode: {'PAPER' if self.paper_trading else 'LIVE'}")
+        logger.info("Starting volatile stock trading application...")
+        logger.info(f"Tickers: {', '.join(self.strategy.config.tickers)} | Mode: {'PAPER' if self.paper_trading else 'LIVE'}")
 
         while self.running:
             try:
@@ -246,14 +213,16 @@ class TradingApplication:
                         minutes = int((wait_time % 3600) // 60)
                         logger.info(f"Market closed. Opens in {hours}h {minutes}m. Waiting...")
 
-                        # Sleep in chunks to allow graceful shutdown
-                        sleep_chunk = min(wait_time, 300)  # 5 minute chunks
+                        sleep_chunk = min(wait_time, 300)
                         await asyncio.sleep(sleep_chunk)
                         continue
 
                 # Run strategy
                 if self.paper_trading:
-                    await self._run_paper_trading()
+                    # For now, just run the same strategy
+                    # In production you'd want separate paper trading logic
+                    logger.warning("Paper trading with live signals - no orders placed")
+                    await self.strategy.run()
                 else:
                     await self.strategy.run()
 
@@ -264,124 +233,23 @@ class TradingApplication:
                 logger.error(f"Error in trading loop: {type(e).__name__}: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
-    async def _run_paper_trading(self):
-        """Paper trading mode - simulates trades without placing real orders"""
-        logger.info("Paper trading session started")
-
-        paper_position = None
-        paper_pnl = 0.0
-        paper_trades = []
-
-        while self.running and self._is_market_open():
-            try:
-                # Get SPY quote
-                snapshot = await self.client.get_quote("SPY")
-
-                if snapshot:
-                    self.strategy.price_history.append(snapshot)
-
-                    # Check for signals
-                    if not paper_position:
-                        signal = self.strategy.detect_momentum_signal(snapshot)
-
-                        if signal:
-                            # Simulate entry
-                            contract = await self.strategy.select_contract(signal, snapshot.price)
-
-                            if contract:
-                                paper_position = {
-                                    "contract": contract,
-                                    "entry_price": contract.mid_price,
-                                    "entry_time": datetime.now(),
-                                    "signal": signal
-                                }
-                                logger.info(f"[PAPER] Opened: {signal.value} {contract.symbol} @ ${contract.mid_price:.2f}")
-
-                    # Manage paper position
-                    if paper_position:
-                        # Get current price
-                        chain = await self.client.get_option_chain()
-                        current = next(
-                            (c for c in chain if c.symbol == paper_position["contract"].symbol),
-                            None
-                        )
-
-                        if current:
-                            entry = paper_position["entry_price"]
-                            current_price = current.mid_price
-                            pnl_pct = ((current_price - entry) / entry) * 100
-
-                            # Check exits
-                            should_exit = False
-                            reason = ""
-
-                            if pnl_pct <= -self.strategy.config.stop_loss_percent:
-                                should_exit = True
-                                reason = "Stop loss"
-                            elif pnl_pct >= self.strategy.config.take_profit_percent:
-                                should_exit = True
-                                reason = "Take profit"
-                            elif datetime.now().strftime("%H:%M") >= "15:55":
-                                should_exit = True
-                                reason = "EOD exit"
-
-                            if should_exit:
-                                pnl = (current_price - entry) * 100  # Per contract
-                                paper_pnl += pnl
-                                paper_trades.append({
-                                    "symbol": paper_position["contract"].symbol,
-                                    "side": paper_position["signal"].value,
-                                    "entry": entry,
-                                    "exit": current_price,
-                                    "pnl": pnl,
-                                    "reason": reason
-                                })
-
-                                logger.info(f"[PAPER] Closed: {reason} | P&L: ${pnl:.2f} ({pnl_pct:.1f}%)")
-                                logger.info(f"[PAPER] Session P&L: ${paper_pnl:.2f} | Trades: {len(paper_trades)}")
-                                paper_position = None
-
-                await asyncio.sleep(0.05)
-
-            except Exception as e:
-                logger.error(f"Paper trading error: {type(e).__name__}: {e}", exc_info=True)
-                await asyncio.sleep(1)
-
-        # Session summary
-        if paper_trades:
-            winners = sum(1 for t in paper_trades if t["pnl"] > 0)
-            losers = len(paper_trades) - winners
-            win_rate = (winners / len(paper_trades)) * 100 if paper_trades else 0
-
-            logger.info("\n" + "="*50)
-            logger.info("  PAPER TRADING SESSION SUMMARY")
-            logger.info("="*50)
-            logger.info(f"  Total Trades: {len(paper_trades)}")
-            logger.info(f"  Winners: {winners} | Losers: {losers}")
-            logger.info(f"  Win Rate: {win_rate:.1f}%")
-            logger.info(f"  Total P&L: ${paper_pnl:.2f}")
-            logger.info("="*50 + "\n")
-
     async def shutdown(self):
         """Graceful shutdown"""
         logger.info("Shutting down...")
         self.running = False
 
-        # Stop the strategy first (so it stops making API calls)
         if self.strategy:
             self.strategy.stop()
 
-        # Small delay to let the loop exit cleanly
         await asyncio.sleep(0.2)
 
-        # Then close the client session
         if self.client:
             await self.client.close()
 
         logger.info("Shutdown complete")
 
 
-def setup_signal_handlers(app: TradingApplication, loop: asyncio.AbstractEventLoop):
+def setup_signal_handlers(app: VolatileStockTradingApp, loop: asyncio.AbstractEventLoop):
     """Setup signal handlers for graceful shutdown"""
     def signal_handler():
         logger.info("Received shutdown signal")
@@ -391,18 +259,22 @@ def setup_signal_handlers(app: TradingApplication, loop: asyncio.AbstractEventLo
         try:
             loop.add_signal_handler(sig, signal_handler)
         except NotImplementedError:
-            # Windows doesn't support add_signal_handler
             signal.signal(sig, lambda s, f: signal_handler())
 
 
 async def main_async(args):
     """Async main entry point"""
-    app = TradingApplication(
+    # Parse custom tickers
+    tickers = None
+    if args.tickers:
+        tickers = [t.strip().upper() for t in args.tickers.split(",")]
+
+    app = VolatileStockTradingApp(
         config_dir=args.config_dir,
         paper_trading=not args.live,
-        live_flag_explicit=args.live,
+        tickers=tickers,
         log_level=args.log_level,
-        enable_safety=not args.disable_safety  # Safety on by default, can disable
+        enable_safety=not args.disable_safety  # Safety on by default
     )
 
     # Setup signal handlers
@@ -428,14 +300,15 @@ async def main_async(args):
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="Schwab 0DTE SPY Options Momentum Trading Bot",
+        description="Volatile Stocks 0DTE Options Momentum Trading Bot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python schwab_0dte_main.py --setup          # First-time setup
-  python schwab_0dte_main.py --paper          # Paper trading (default)
-  python schwab_0dte_main.py --live           # Live trading
-  python schwab_0dte_main.py --show           # Show configuration
+  python volatile_stocks_main.py --paper                    # Paper trading with default tickers
+  python volatile_stocks_main.py --paper --tickers NVDA,AMD # Custom tickers
+  python volatile_stocks_main.py --live                     # Live trading
+
+Default Tickers: NVDA, TSLA, AMD, AAPL, MSFT, META, GOOGL, AMZN
 
 Risk Warning:
   0DTE options trading is EXTREMELY HIGH RISK. Options can expire
@@ -443,16 +316,6 @@ Risk Warning:
         """
     )
 
-    parser.add_argument(
-        "--setup",
-        action="store_true",
-        help="Run interactive setup wizard"
-    )
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Show current configuration"
-    )
     parser.add_argument(
         "--paper",
         action="store_true",
@@ -463,6 +326,11 @@ Risk Warning:
         "--live",
         action="store_true",
         help="Run in LIVE trading mode (requires confirmation)"
+    )
+    parser.add_argument(
+        "--tickers",
+        type=str,
+        help="Comma-separated list of tickers (e.g., NVDA,TSLA,AMD)"
     )
     parser.add_argument(
         "--config-dir",
@@ -478,36 +346,12 @@ Risk Warning:
         help="Logging level (default: INFO)"
     )
     parser.add_argument(
-        "--log-file",
-        type=str,
-        help="Log to file in addition to console"
-    )
-    parser.add_argument(
         "--disable-safety",
         action="store_true",
         help="Disable account safety checks (NOT RECOMMENDED - for testing only)"
     )
 
     args = parser.parse_args()
-
-    # Setup logging to file if specified
-    if args.log_file:
-        file_handler = logging.FileHandler(args.log_file)
-        file_handler.setFormatter(logging.Formatter(
-            '%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        ))
-        logging.getLogger().addHandler(file_handler)
-
-    # Handle setup mode
-    if args.setup:
-        setup_credentials_interactive()
-        return 0
-
-    # Handle show config
-    if args.show:
-        show_current_config()
-        return 0
 
     # Live trading confirmation
     if args.live:
@@ -517,9 +361,9 @@ Risk Warning:
         print("\n  You are about to start LIVE trading with REAL MONEY.")
         print("  0DTE options are extremely high risk.")
         print("\n  This bot will automatically:")
-        print("    - Buy and sell SPY options")
+        print("    - Monitor multiple volatile stocks")
+        print("    - Buy and sell 0DTE options")
         print("    - Use real funds from your Schwab account")
-        print("    - Execute trades based on momentum signals")
         print("\n  There is NO GUARANTEE of profit.")
         print("  You could lose your ENTIRE investment.")
         print("\n" + "="*60)

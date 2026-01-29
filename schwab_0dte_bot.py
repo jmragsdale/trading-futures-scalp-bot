@@ -411,6 +411,34 @@ class SchwabClient:
                 return [p for p in positions if p.get("instrument", {}).get("assetType") == "OPTION"]
         return []
 
+    async def get_account_info(self) -> Dict:
+        """Get account balances and buying power for safety checks"""
+        await self._ensure_valid_token()
+
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        url = f"{self.config.api_base}/trader/v1/accounts/{self.account_hash}"
+        params = {"fields": "positions"}
+
+        async with self.session.get(url, headers=headers, params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                account = data.get("securitiesAccount", {})
+                balances = account.get("currentBalances", {})
+
+                return {
+                    "cash": float(balances.get("cashBalance", 0)),
+                    "buyingPower": float(balances.get("buyingPower", 0)),
+                    "liquidationValue": float(balances.get("liquidationValue", 0)),
+                    "accountType": account.get("type", "CASH")
+                }
+
+        return {
+            "cash": 0.0,
+            "buyingPower": 0.0,
+            "liquidationValue": 0.0,
+            "accountType": "CASH"
+        }
+
     async def close(self):
         """Clean up"""
         if self.session:
@@ -423,9 +451,10 @@ class ZeroDTEMomentumStrategy:
     Buys calls on bullish momentum, puts on bearish momentum
     """
 
-    def __init__(self, client: SchwabClient, config: OptionsConfig):
+    def __init__(self, client: SchwabClient, config: OptionsConfig, safety_manager=None):
         self.client = client
         self.config = config
+        self.safety_manager = safety_manager  # Optional account safety manager
         self.price_history = deque(maxlen=1000)
         self.last_signal_time = 0
         self.last_signal_price = 0
@@ -597,6 +626,37 @@ class ZeroDTEMomentumStrategy:
 
         if not contract:
             return
+
+        # SAFETY CHECK: Verify we can afford this trade
+        if self.safety_manager:
+            try:
+                account_data = await self.client.get_account_info()
+
+                # Import here to avoid circular dependency
+                from schwab_account_safety import AccountInfo
+
+                account_info = AccountInfo(
+                    cash_available=account_data['cash'],
+                    buying_power=account_data['buyingPower'],
+                    account_type=account_data['accountType'],
+                    account_value=account_data['liquidationValue']
+                )
+
+                can_trade, reason = self.safety_manager.can_trade(account_info, contract.mid_price)
+
+                if not can_trade:
+                    logger.warning(f"🛑 TRADE BLOCKED BY SAFETY: {reason}")
+                    logger.warning(f"   Option: {contract.symbol} @ ${contract.mid_price:.2f} (${contract.mid_price * 100:.2f} total)")
+                    logger.warning(f"   Account: ${account_info.cash_available:.2f} cash, ${account_info.account_value:.2f} total")
+                    return
+
+                # Log safety approval
+                max_contracts = self.safety_manager.get_max_contracts_allowed(account_info, contract.mid_price)
+                logger.info(f"✅ Safety approved: ${contract.mid_price:.2f} option (max {max_contracts} contracts allowed)")
+
+            except Exception as e:
+                logger.error(f"Safety check failed: {e}. Blocking trade as precaution.")
+                return
 
         # Use aggressive limit for better fill probability
         if self.config.use_aggressive_limit:
@@ -797,6 +857,19 @@ class ZeroDTEMomentumStrategy:
 
             logger.info(f"Position closed: {reason} | Entry: ${entry:.2f} | "
                        f"Exit: ${exit_price:.2f} | P&L: ${pnl:.2f} ({pnl_percent:.1f}%)")
+
+            # Record trade with safety manager
+            if self.safety_manager:
+                entry_time = datetime.fromtimestamp(self.current_position["entry_time"])
+                exit_time = datetime.now()
+                self.safety_manager.record_trade(entry_time, exit_time, pnl)
+
+                # Log safety status
+                status = self.safety_manager.get_safety_status()
+                logger.info(f"📊 Daily Stats: {status['daily_trades']} trades, "
+                           f"${status['daily_pnl']:.2f} P&L, "
+                           f"{status['day_trades_last_5_days']} day trades (last 5 days)")
+
             self.current_position = None
             # Reset trailing stop state
             self.trailing_stop_active = False
