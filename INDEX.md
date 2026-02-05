@@ -48,7 +48,27 @@ python volatile_stocks_main.py --live                       # Live trading
 
 ---
 
-### 3. Tradovate Micro Futures Bot 📈
+### 3. Momentum Scalp Bot (Ross Cameron Style) 💰
+**Strategy:** VWAP/breakout scalping on small-cap gappers (SHARES, not options)
+**Difficulty:** Intermediate
+**Quick Start:** [MOMENTUM_SCALP_QUICKSTART.md](MOMENTUM_SCALP_QUICKSTART.md)
+
+**Best For:**
+- Small accounts ($1K-$10K)
+- Want fast scalps on momentum stocks
+- Comfortable with volatile small caps
+- Trading Terminal / scanner users
+
+**Commands:**
+```bash
+python momentum_scalp_main.py --paper                     # Auto-scan for gappers
+python momentum_scalp_main.py --paper --tickers ABCD,XYZ  # Manual tickers
+python momentum_scalp_main.py --live                      # Live trading
+```
+
+---
+
+### 4. Tradovate Micro Futures Bot 📈
 **Strategy:** Tick-based momentum on MES, MNQ futures
 **Difficulty:** Advanced
 **Quick Start:** [README.md](README.md) (original)
