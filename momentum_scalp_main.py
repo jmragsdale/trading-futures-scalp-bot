@@ -62,12 +62,14 @@ class MomentumScalpApp:
                  extended_hours: bool = False,
                  max_price: float = 30.0,
                  min_gap: float = 4.0,
-                 max_trades: int = 3):
+                 max_trades: int = 3,
+                 paper_balance: Optional[float] = None):
 
         self.config_dir = config_dir
         self.paper_mode = paper_mode
         self.manual_tickers = manual_tickers
         self.extended_hours = extended_hours
+        self.paper_balance = paper_balance
         self.running = False
 
         # Configure scanner
@@ -150,6 +152,7 @@ class MomentumScalpApp:
             config=self.scalp_config,
             scanner=self.scanner,
             paper_mode=self.paper_mode,
+            paper_balance=self.paper_balance,
         )
 
         logger.info("✅ All components initialized")
@@ -393,6 +396,7 @@ async def main_async(args):
         max_price=args.max_price,
         min_gap=args.min_gap,
         max_trades=args.max_trades,
+        paper_balance=args.paper_balance,
     )
 
     loop = asyncio.get_event_loop()
@@ -448,6 +452,8 @@ Best performance: First 2 hours after market open (9:30-11:30 AM).
                         help="Minimum gap %% for scanner (default: 4%%)")
     parser.add_argument("--max-trades", type=int, default=3,
                         help="Max trades per day (default: 3)")
+    parser.add_argument("--paper-balance", type=float, default=None,
+                        help="Simulated account balance for paper trading (e.g., 3000)")
     parser.add_argument("--config-dir", type=str, default="~/.schwab_0dte_bot",
                         help="Schwab config directory")
     parser.add_argument("--log-level", type=str, default="INFO",

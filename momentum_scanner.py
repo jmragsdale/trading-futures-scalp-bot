@@ -225,7 +225,7 @@ class MomentumScanner:
         candidates = []
 
         # Scan both NASDAQ and NYSE
-        for index in ["$COMPX", "$NYSE", "$SPX"]:
+        for index in ["$DJI", "$COMPX", "$SPX", "NASDAQ", "NYSE", "EQUITY_ALL"]:
             url = f"{self.config.api_base}/marketdata/v1/movers/{index}"
             params = {
                 "sort": "PERCENT_CHANGE_UP",

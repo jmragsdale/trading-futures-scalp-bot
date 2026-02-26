@@ -380,11 +380,13 @@ class MomentumScalpStrategy:
     """
 
     def __init__(self, client: MomentumSchwabClient, config: ScalpConfig,
-                 scanner: MomentumScanner, paper_mode: bool = True):
+                 scanner: MomentumScanner, paper_mode: bool = True,
+                 paper_balance: Optional[float] = None):
         self.client = client
         self.config = config
         self.scanner = scanner
         self.paper_mode = paper_mode
+        self.paper_balance = paper_balance  # Simulated balance for paper trading
 
         # Active watchlist
         self.watchlist: List[GapCandidate] = []
@@ -917,13 +919,29 @@ class MomentumScalpStrategy:
         self.running = True
         self._reset_daily()
 
-        # Get account info
-        try:
-            self.settled_cash, self.total_cash = await self.client.get_settled_cash()
-            logger.info(f"💰 Account: ${self.total_cash:.2f} total, ${self.settled_cash:.2f} settled")
-        except Exception as e:
-            logger.error(f"Failed to get account info: {e}")
-            return
+        # Get account info (or use paper balance)
+        if self.paper_balance and self.paper_mode:
+            self.total_cash = self.paper_balance
+            self.settled_cash = self.paper_balance
+            logger.info(f"💰 Paper Balance: ${self.total_cash:.2f} (simulated)")
+        else:
+            try:
+                self.settled_cash, self.total_cash = await self.client.get_settled_cash()
+                logger.info(f"💰 Account: ${self.total_cash:.2f} total, ${self.settled_cash:.2f} settled")
+                
+                # If real account is empty but we have paper balance, use it in paper mode
+                if self.paper_mode and self.paper_balance and self.total_cash <= 0:
+                    self.total_cash = self.paper_balance
+                    self.settled_cash = self.paper_balance
+                    logger.info(f"💰 Using paper balance: ${self.paper_balance:.2f} (real account empty)")
+            except Exception as e:
+                if self.paper_mode and self.paper_balance:
+                    self.total_cash = self.paper_balance
+                    self.settled_cash = self.paper_balance
+                    logger.warning(f"Account fetch failed, using paper balance: ${self.paper_balance:.2f}")
+                else:
+                    logger.error(f"Failed to get account info: {e}")
+                    return
 
         logger.info("=" * 60)
         logger.info(f"  🚀 MOMENTUM SCALP BOT — {'PAPER' if self.paper_mode else 'LIVE'} MODE")
